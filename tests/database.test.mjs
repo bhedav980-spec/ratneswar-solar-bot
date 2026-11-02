@@ -1,0 +1,15 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import {PGlite} from '@electric-sql/pglite';
+test('Postgres queue, webhook deduplication, consent, reminders and STOP',async()=>{const db=new PGlite();try{
+await db.exec(`create role anon;create role authenticated;create role service_role bypassrls;create schema storage;create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);`);
+await db.exec(await readFile(new URL('../supabase/001_schema.sql',import.meta.url),'utf8'));
+const receive=async(id,text,stop=false)=>db.query('select receive_message($1,$2,$3,$4,now(),$5)',[id,'918128399432','Vishal',text,stop]);
+await receive('incoming-1','Hello');await receive('incoming-1','Hello');let r=await db.query('select * from jobs');assert.equal(r.rows.length,1);assert.equal(r.rows[0].payload.first,true);
+await receive('incoming-2','Bhachau');r=await db.query("select payload from jobs where dedupe_key='reply:incoming-2'");assert.equal(r.rows[0].payload.first,false);
+let lead=(await db.query('select * from leads')).rows[0];await db.query("update leads set marketing_consent=true,next_reminder_at=now()-interval '1 day' where id=$1",[lead.id]);await db.exec("update bot_settings set reminder_template='approved_reminder';select enqueue_reminders();select enqueue_reminders();");
+assert.equal((await db.query("select * from jobs where kind='reminder'")).rows.length,1);
+await db.exec("update jobs set status='sent' where kind='reply'");const claimed=(await db.query('select * from claim_job()')).rows[0];assert.equal(claimed.kind,'reminder');assert.equal((await db.query('select * from claim_job()')).rows.length,0);
+await db.query('select complete_job($1,$2)',[claimed.id,'wamid-1']);await db.query('select complete_job($1,$2)',[claimed.id,'wamid-1']);lead=(await db.query('select * from leads')).rows[0];assert.equal(lead.reminder_count,1);assert.ok(new Date(lead.next_reminder_at)>new Date(Date.now()+2*86400000));
+await db.exec("insert into leads(phone,name) values('919999999999','No consent');insert into campaigns(name,caption,starts_at,ends_at,enabled,template_name) values('Offer','caption',now(),now()+interval '1 day',true,'offer_template');");let campaign=(await db.query('select * from campaigns')).rows[0];assert.equal((await db.query('select enqueue_campaign($1) as n',[campaign.id])).rows[0].n,1);assert.equal((await db.query('select enqueue_campaign($1) as n',[campaign.id])).rows[0].n,0);
+await receive('incoming-stop','STOP',true);lead=(await db.query("select * from leads where phone='918128399432'")).rows[0];assert.equal(lead.opted_out,true);assert.equal(lead.status,'no');assert.equal(lead.marketing_consent,false);assert.equal((await db.query("select * from jobs where kind='broadcast' and status='queued'")).rows.length,0);
+await db.exec("set role anon");await assert.rejects(()=>db.query('select * from leads'));await db.exec('reset role');
+}finally{await db.close()}});
